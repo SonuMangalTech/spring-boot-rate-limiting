@@ -1,2 +1,615 @@
-# spring-boot-rate-limiting
-Spring Boot Rate Limiting implementation using Spring Security, Bucket4j, ConcurrentHashMap, and Redis. Demonstrates filter-level and method-level rate limiting with user-specific and API-specific limits.
+# Spring Boot Rate Limiting
+
+A Spring Boot project demonstrating **API Rate Limiting** using **Bucket4j** and **ConcurrentHashMap**, with user identification and authorization handled by **Spring Security**.
+
+The project uses **H2 Database** to store users and API-specific rate-limit configuration.
+
+> **Note:** JWT authentication is intentionally not implemented in the current version. Users are temporarily identified using the `X-USER-KEY` request header.
+
+---
+
+## 🚀 Features
+
+* Spring Boot
+* Spring Security
+* H2 Database
+* Bucket4j Token Bucket algorithm
+* ConcurrentHashMap for in-memory bucket storage
+* User-based rate limiting
+* API-based rate limiting
+* Different rate limits for different user roles
+* Multiple API rate-limit configurations
+* HTTP `429 Too Many Requests` response when the limit is exceeded
+* H2 Console for database inspection
+* No JWT authentication in the current implementation
+
+---
+
+## 🏗️ Architecture
+
+```text
+                    Client
+                      |
+                      | X-USER-KEY
+                      v
+             Spring Security
+                      |
+                      v
+        UserKeyAuthenticationFilter
+                      |
+                      | Find User by userKey
+                      v
+                 H2 Database
+                      |
+                      v
+                UserPrincipal
+                      |
+                      v
+               RateLimitFilter
+                      |
+                      v
+              RateLimitService
+                      |
+                      v
+             ConcurrentHashMap
+                      |
+                      v
+                 Bucket4j
+                      |
+             +--------+--------+
+             |                 |
+          Allowed            Rejected
+             |                 |
+             v                 v
+        Controller       HTTP 429
+```
+
+---
+
+## 🔄 Request Flow
+
+```text
+HTTP Request
+     |
+     | X-USER-KEY
+     v
+UserKeyAuthenticationFilter
+     |
+     |-- Find user from DB
+     |
+     |-- Create UserPrincipal
+     |
+     |-- Store Authentication in SecurityContext
+     |
+     v
+RateLimitFilter
+     |
+     |-- Get authenticated user
+     |
+     |-- Identify API
+     |
+     |-- Check/create Bucket4j bucket
+     |
+     v
+ConcurrentHashMap
+     |
+     v
+Bucket4j
+     |
+     +---- Token available ----> Controller
+     |
+     +---- No token -----------> HTTP 429
+```
+
+---
+
+## 🗄️ Database Design
+
+### USER_DETAIL
+
+Stores application users.
+
+| Column     | Description                          |
+| ---------- | ------------------------------------ |
+| `id`       | Primary key                          |
+| `username` | Username                             |
+| `password` | Password                             |
+| `user_key` | Unique key used to identify the user |
+| `role`     | ADMIN / NORMAL / GUEST               |
+
+Example:
+
+```text
++----+----------+-------------+------------+
+| id | username | user_key    | role       |
++----+----------+-------------+------------+
+|  1 | sonu     | ADMIN_KEY   | ADMIN      |
+|  2 | rahul    | NORMAL_KEY  | NORMAL     |
+|  3 | amit     | GUEST_KEY   | GUEST      |
++----+----------+-------------+------------+
+```
+
+### API_RATE_LIMIT
+
+Stores API-specific rate limits.
+
+| Column       | Description              |
+| ------------ | ------------------------ |
+| `id`         | Primary key              |
+| `api_name`   | API name                 |
+| `rate_limit` | Maximum allowed requests |
+
+Example:
+
+```text
++----------+--------+------------+
+| api_name | role   | rate_limit |
++----------+--------+------------+
+| login    | ADMIN  | 10         |
+| login    | NORMAL | 5          |
+| login    | GUEST  | 2          |
+| history  | ADMIN  | 20         |
+| history  | NORMAL | 10         |
+| history  | GUEST  | 3          |
++----------+--------+------------+
+```
+
+---
+
+## 👥 User Types
+
+The application supports three user types:
+
+```java
+public enum ROLE {
+    ADMIN,
+    NORMAL,
+    GUEST
+}
+```
+
+Example rate limits:
+
+```text
+ADMIN
+  login   -> 10 requests/minute
+  history -> 20 requests/minute
+
+NORMAL
+  login   -> 5 requests/minute
+  history -> 10 requests/minute
+
+GUEST
+  login   -> 2 requests/minute
+  history -> 3 requests/minute
+```
+
+---
+
+## 🪣 Bucket4j
+
+Bucket4j implements the **Token Bucket** algorithm.
+
+For example:
+
+```text
+capacity = 5
+refill = 5 tokens
+duration = 60 seconds
+```
+
+means:
+
+```text
+Initial bucket
+      |
+      v
+   5 tokens
+      |
+      | Request
+      v
+   4 tokens
+      |
+      | Request
+      v
+   3 tokens
+      |
+      ...
+      |
+      v
+   0 tokens
+      |
+      v
+HTTP 429
+```
+
+After the configured refill period, tokens become available again.
+
+---
+
+## 🧠 ConcurrentHashMap
+
+Buckets are stored in memory using:
+
+```java
+ConcurrentHashMap<String, Bucket>
+```
+
+The bucket key is:
+
+```text
+userKey + ":" + apiName
+```
+
+Example:
+
+```text
+ADMIN_KEY:login
+ADMIN_KEY:history
+
+NORMAL_KEY:login
+NORMAL_KEY:history
+
+GUEST_KEY:login
+GUEST_KEY:history
+```
+
+This means each user has an independent Bucket4j bucket for each API.
+
+---
+
+## 🔐 Spring Security
+
+The current implementation does not use JWT.
+
+Instead, the client sends:
+
+```http
+X-USER-KEY: NORMAL_KEY
+```
+
+The custom security filter:
+
+1. Reads `X-USER-KEY`.
+2. Finds the user from H2.
+3. Creates `UserPrincipal`.
+4. Creates Spring Security `Authentication`.
+5. Stores the authentication in `SecurityContextHolder`.
+
+The rate-limit filter then gets the authenticated user from Spring Security.
+
+---
+
+## 📁 Project Structure
+
+```text
+src/main/java/com/example/ratelimit
+│
+├── RateLimitApplication.java
+│
+├── config
+│   └── SecurityConfig.java
+│
+├── controller
+│   └── ApiController.java
+│
+├── entity
+│   ├── UserEntity.java
+│   ├── ApiEntity.java
+│   └── ROLE.java
+│
+├── repository
+│   ├── UserRepository.java
+│   └── ApiRepository.java
+│
+├── security
+│   ├── UserPrincipal.java
+│   └── UserKeyAuthenticationFilter.java
+│
+└── service
+    └── RateLimitService.java
+```
+
+---
+
+## 🛠️ Technologies
+
+* Java 17+
+* Spring Boot
+* Spring Security
+* Spring Data JPA
+* H2 Database
+* Bucket4j
+* Maven
+
+---
+
+## 📦 Maven Dependency
+
+Bucket4j:
+
+```xml
+<dependency>
+    <groupId>com.bucket4j</groupId>
+    <artifactId>bucket4j_jdk17-core</artifactId>
+    <version>8.10.1</version>
+</dependency>
+```
+
+Spring Security:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+Spring Data JPA:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+```
+
+H2:
+
+```xml
+<dependency>
+    <groupId>com.h2database</groupId>
+    <artifactId>h2</artifactId>
+    <scope>runtime</scope>
+</dependency>
+```
+
+---
+
+## ⚙️ Configuration
+
+Example `application.properties`:
+
+```properties
+spring.application.name=rate-limit-demo
+
+server.port=8080
+
+spring.datasource.url=jdbc:h2:file:./data/rate-limit-db
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+```
+
+---
+
+## ▶️ Running the Application
+
+Clone the repository:
+
+```bash
+git clone <your-repository-url>
+```
+
+Navigate to the project:
+
+```bash
+cd spring-boot-rate-limit
+```
+
+Run using Maven:
+
+```bash
+mvn spring-boot:run
+```
+
+Or build the project:
+
+```bash
+mvn clean package
+```
+
+Then run:
+
+```bash
+java -jar target/*.jar
+```
+
+---
+
+## 🧪 Testing the APIs
+
+### Login API
+
+```http
+GET http://localhost:8080/api/login
+X-USER-KEY: NORMAL_KEY
+```
+
+For a NORMAL user:
+
+```text
+Maximum: 5 requests/minute
+```
+
+After the limit is exceeded:
+
+```http
+HTTP/1.1 429 Too Many Requests
+```
+
+---
+
+### History API
+
+```http
+GET http://localhost:8080/api/history
+X-USER-KEY: NORMAL_KEY
+```
+
+For a NORMAL user:
+
+```text
+Maximum: 10 requests/minute
+```
+
+---
+
+## 📊 Example
+
+Suppose:
+
+```text
+NORMAL_KEY
+```
+
+has:
+
+```text
+login = 5 requests/minute
+history = 10 requests/minute
+```
+
+The following buckets are created:
+
+```text
+NORMAL_KEY:login
+        |
+        +---- 5 tokens
+
+NORMAL_KEY:history
+        |
+        +---- 10 tokens
+```
+
+Calling `/login` does not consume tokens from `/history`.
+
+Likewise, calling `/history` does not consume tokens from `/login`.
+
+---
+
+## ❌ Rate Limit Exceeded
+
+When the Bucket4j bucket has no available token:
+
+```java
+bucket.tryConsume(1)
+```
+
+returns:
+
+```text
+false
+```
+
+The API responds with:
+
+```http
+429 Too Many Requests
+```
+
+Example response:
+
+```json
+{
+  "error": "RATE_LIMIT_EXCEEDED",
+  "message": "Too many requests"
+}
+```
+
+---
+
+## ⚠️ Current Limitation
+
+The current implementation stores Bucket4j buckets in:
+
+```java
+ConcurrentHashMap
+```
+
+Therefore, the rate-limit state is **local to a single application instance**.
+
+For example:
+
+```text
+              Load Balancer
+                   |
+          +--------+--------+
+          |        |        |
+          v        v        v
+       App-1    App-2    App-3
+         |        |        |
+       Map-1    Map-2    Map-3
+```
+
+Each application instance has its own buckets.
+
+Therefore, this implementation is suitable for:
+
+* Learning
+* Local development
+* Single-instance applications
+* Demonstrating the Token Bucket algorithm
+
+For a distributed production environment, a shared store such as **Redis** should be used.
+
+---
+
+## 🔮 Future Improvements
+
+Planned improvements:
+
+* JWT authentication
+* Redis-based distributed rate limiting
+* Spring Cloud Gateway integration
+* API-specific configuration
+* IP-based rate limiting
+* User-based rate limiting
+* Role-based rate limiting
+* Dynamic rate-limit configuration
+* Rate-limit response headers
+* Monitoring with Actuator
+* Prometheus metrics
+* Docker support
+* Kubernetes deployment
+
+---
+
+## 🎯 Learning Objectives
+
+This project demonstrates:
+
+```text
+Spring Security
+      +
+Custom Security Filter
+      +
+UserPrincipal
+      +
+SecurityContext
+      +
+Bucket4j
+      +
+Token Bucket
+      +
+ConcurrentHashMap
+      +
+Spring Data JPA
+      +
+H2
+```
+
+The main goal is to understand how **application-level rate limiting can be implemented using Spring Security filters and Bucket4j**.
+
+---
+
+## 📄 License
+
+This project is created for learning and demonstration purposes.
+
