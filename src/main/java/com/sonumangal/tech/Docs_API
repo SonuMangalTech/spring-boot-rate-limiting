@@ -1,0 +1,162 @@
+> H2 stores users and API-specific rate limits.
+> ConcurrentHashMap stores the in-memory Bucket4j buckets.
+> No JWT/Auth yet.
+> We identify the user using userKey from a request header. (UserKeyAuthenticationFilter)
+> User types: ADMIN, NORMAL, GUEST.
+> APIs: login, history (Filter level) and getUsers (Method Level).
+> Each user can have a different rate limit for each API.
+
+-------------------------------------
+> USER_DETAILS
+ID  	PASSWORD  	ROLE  	USER_KEY  	USERNAME
+1	mangal	ADMIN	smangal	sonu
+2	mangal	ADMIN	imangal	ishi
+
+> API_RATE_LIMIT
+ID  	API_NAME  	RATE_LIMIT  	USER_DETAIL_ID
+1	login	5	1
+2	history	4	1
+3	login	5	2
+4	history	4	2
+5	getUsers	4	2
+-------------------------------------
+
+-- Create user --
+    --> permit from securityConfig and custom filter (Bypass Auth)
+    --> one-to-many mapping (Users and Api)
+    -->  UserController.java file
+
+    postman request POST 'http://localhost:8080/user/addUser' \
+      --header 'Content-Type: application/json' \
+      --body '{
+        "username": "sonu",
+        "password": "mangal",
+        "userKey": "smangal",
+        "role": "ADMIN",
+        "apiEntities": [
+            {
+                "apiName": "login",
+                "rateLimit": 5
+            },
+            {
+                "apiName": "history",
+                "rateLimit": 4
+            }
+        ]
+    }'
+
+-- Get User --
+        --> permit from securityConfig and custom filter (Bypass Auth)
+        --> one-to-many mapping (Users and Api)
+        -->  UserController.java file
+
+    postman request 'http://localhost:8080/user/getUsers'
+
+----------------------------------------------------------------
+------- Rate Limit Filter Level -----
+    --> Authenticate API
+    -->  RateLimitController.java file
+    --> SecurityConfig -> UserKeyAuthenticationFilter (Get Limit from DB) -> RateLimitFilter -> RateLimitService
+        -> Controller
+
+CLIENT REQUEST
+      |
+      v
+Spring Security Filter Chain
+      |
+      v
+UserKeyAuthenticationFilter
+      |
+      |-- Read X-USER-KEY
+      |
+      |-- Find user in USER_DETAIL
+      |
+      |-- User found?
+      |      |
+      |      +-- NO  --> 401 Unauthorized
+      |      |
+      |      +-- YES
+      |             |
+      |             v
+      |        Create Authentication
+      |             |
+      |             v
+      |        Store in SecurityContext
+      |
+      v
+RateLimitFilter
+      |
+      |-- Get authenticated user
+      |
+      |-- Identify API
+      |
+      |-- Call RateLimitService
+      |
+      v
+RateLimitService
+      |
+      |-- Create bucket key
+      |      userKey + API name
+      |
+      |-- Check ConcurrentHashMap
+      |      |
+      |      +-- Bucket exists
+      |      |      |
+      |      |      +-- Use existing Bucket4j bucket
+      |      |
+      |      +-- Bucket does not exist
+      |             |
+      |             +-- Get rate limit from DB
+      |             |
+      |             +-- Create Bucket4j bucket
+      |             |
+      |             +-- Put bucket in ConcurrentHashMap
+      |
+      |-- Try consume 1 token
+      |
+      +---- Allowed ----> Controller
+      |
+      +---- Rejected ---> 429 Too Many Requests
+
+API:
+    postman request 'http://localhost:8080/rateLimit/history' \
+      --header 'X-USER-KEY: smangal'
+
+
+------- Rate Limit Method Level -----
+Flow:
+                    HTTP Request
+                         |
+                         v
+              UserKeyAuthenticationFilter
+                         |
+                         v
+                Spring Security
+                         |
+             +-----------+-----------+
+             |                       |
+             v                       v
+      Filter-level API        Controller Method
+             |                       |
+      RateLimitFilter           @RateLimit
+             |                       |
+             |                  RateLimitAspect
+             |                       |
+             +-----------+-----------+
+                         |
+                         v
+                  RateLimitService
+                         |
+                         v
+                    Bucket4j
+                         |
+                         v
+                      Redis
+
+API:
+    postman request 'http://localhost:8080/rateLimit/getUsers' \
+      --header 'X-USER-KEY: imangal' \
+      --header 'Cookie: JSESSIONID=FB4A30301A61CC7265800993BF55A66A'
+
+
+
